@@ -2,6 +2,7 @@ import os
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont
 
 
 # ==== НАСТРОЙКИ ТРАНСЛИТА (можно править руками) ===========================
@@ -51,9 +52,7 @@ DEFAULT_MAPPING_SINGLE = {
     "x": "кс",
     "q": "к",
     "w": "в",
-
-    # апостроф = мягкий знак
-    "'": "ь",
+    "'": "ь",   # апостроф = мягкий знак
 }
 
 
@@ -73,7 +72,6 @@ def load_translit_config():
                 m.update(cfg["mapping_single"])
                 mapping_single = m
         except Exception:
-            # Если конфиг битый — просто игнорируем и работаем с дефолтами
             pass
 
     return mapping_multi, mapping_single
@@ -85,16 +83,10 @@ MAPPING_MULTI, MAPPING_SINGLE = load_translit_config()
 def translit_to_cyrillic(text: str) -> str:
     """
     Перевод простого транслита → кириллицу,
-    с сохранением регистра и поддержкой апострофа (мягкий знак).
+    с сохранением регистра и поддержкой апострофа.
     """
 
     def apply_case(src: str, dst: str) -> str:
-        """
-        PRIVET -> ПРИВЕТ
-        Privet -> Привет
-        privet -> привет
-        pRivet -> пРивет (как есть)
-        """
         if src.isupper():
             return dst.upper()
         if src[0].isupper() and src[1:].islower():
@@ -109,7 +101,6 @@ def translit_to_cyrillic(text: str) -> str:
         ch = text[i]
         ch_lower = lower[i]
 
-        # Не латиница и не апостроф — копируем как есть
         if not ("a" <= ch_lower <= "z" or ch_lower == "'"):
             result.append(ch)
             i += 1
@@ -117,7 +108,6 @@ def translit_to_cyrillic(text: str) -> str:
 
         replaced = False
 
-        # МНОГОбуквенные сочетания
         for latin, cyr in MAPPING_MULTI:
             ln = len(latin)
             segment = text[i:i+ln]
@@ -129,7 +119,6 @@ def translit_to_cyrillic(text: str) -> str:
         if replaced:
             continue
 
-        # ОДНОбуквенные (включая апостроф)
         if ch_lower in MAPPING_SINGLE:
             result.append(apply_case(ch, MAPPING_SINGLE[ch_lower]))
         else:
@@ -148,7 +137,7 @@ class RenameToolApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Переименование файлов и папок (транслит → кириллица)")
-        self.geometry("1100x700")
+        self.geometry("1200x700")
 
         self.directory = tk.StringVar()
 
@@ -160,13 +149,11 @@ class RenameToolApp(tk.Tk):
         #   "do_rename": bool,
         #   "is_dir": bool,
         #   "locked": bool,
+        #   "modified": bool,  # [M] – кириллическое имя изменено вручную
         # }
         self.items = []
 
-        # связь "индекс в listbox" -> "индекс в self.items"
-        self.view_indices = []
-
-        # индексы с конфликтами (в self.items)
+        # индексы с конфликтами (индексы в self.items)
         self.conflict_indices = set()
 
         # текущий выбранный индекс в self.items
@@ -177,34 +164,46 @@ class RenameToolApp(tk.Tk):
         self.filter_by_dir = tk.BooleanVar(value=False)
         self.current_filter_dir = ""   # rel_dir текущего фильтра по подкаталогу
 
+        # сортировка
+        self.sort_column = None  # одно из: type, exc, lock, conf, mod, path, new
+        self.sort_reverse = False
+
         self.create_widgets()
+         # НАСТРОЙКА ШРИФТА И ВЫСОТЫ СТРОК ДЛЯ TREEVIEW
+        style = ttk.Style(self)
+
+        # базовый моноширинный шрифт
+        tree_font = tkfont.nametofont("TkFixedFont")
+        tree_font.configure(size=10)  # можно 9–11, на вкус
+
+        # высота строки = высота шрифта + небольшой запас
+        row_h = tree_font.metrics("linespace") + 4
+
+        style.configure(
+            "Treeview",
+            font=tree_font,
+            rowheight=row_h,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("TkDefaultFont", 9, "bold"),
+        )
 
     # ---------- UI ----------
 
     def create_widgets(self):
-        # Верхняя панель: выбор директории, скан, сортировка, сессия
         frame_top = ttk.Frame(self)
         frame_top.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Label(frame_top, text="Директория:").pack(side=tk.LEFT)
-
         entry_dir = ttk.Entry(frame_top, textvariable=self.directory, width=50)
         entry_dir.pack(side=tk.LEFT, padx=(5, 5))
 
-        btn_browse = ttk.Button(frame_top, text="Обзор...", command=self.browse_directory)
-        btn_browse.pack(side=tk.LEFT)
+        ttk.Button(frame_top, text="Обзор...", command=self.browse_directory).pack(side=tk.LEFT)
+        ttk.Button(frame_top, text="Сканировать", command=self.scan_directory).pack(side=tk.LEFT, padx=(10, 0))
 
-        btn_scan = ttk.Button(frame_top, text="Сканировать", command=self.scan_directory)
-        btn_scan.pack(side=tk.LEFT, padx=(10, 0))
-
-        btn_sort = ttk.Button(frame_top, text="Сортировать по поддиректориям", command=self.sort_items)
-        btn_sort.pack(side=tk.LEFT, padx=(10, 0))
-
-        btn_save = ttk.Button(frame_top, text="Сохранить сессию", command=self.save_session)
-        btn_save.pack(side=tk.LEFT, padx=(10, 0))
-
-        btn_load = ttk.Button(frame_top, text="Загрузить сессию", command=self.load_session)
-        btn_load.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(frame_top, text="Сохранить сессию", command=self.save_session).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(frame_top, text="Загрузить сессию", command=self.load_session).pack(side=tk.LEFT, padx=(5, 0))
 
         # Легенда и фильтры
         frame_legend = ttk.Frame(self)
@@ -213,10 +212,7 @@ class RenameToolApp(tk.Tk):
         ttk.Label(
             frame_legend,
             text=(
-                "[DIR] — папка, [FILE] — файл, "
-                "[X] — не переименовывать, "
-                "[L] — имя зафиксировано, "
-                "[!] — конфликт имен"
+                "Тип: DIR/FILE, Исключен: X, Лок: L, Конфликт: !, Изменён: M"
             ),
             foreground="gray"
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 3))
@@ -240,30 +236,54 @@ class RenameToolApp(tk.Tk):
         self.label_current_dir_filter = ttk.Label(frame_legend, text="Фильтр по поддиректории: (нет)")
         self.label_current_dir_filter.grid(row=1, column=2, sticky="w", padx=(20, 0))
 
-        # Центральная часть: список + панель редактирования
+        # Центральная часть
         frame_center = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         frame_center.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
 
-        # Список
-        frame_list = ttk.Frame(frame_center)
-        frame_center.add(frame_list, weight=3)
+        # Таблица
+        frame_table = ttk.Frame(frame_center)
+        frame_center.add(frame_table, weight=3)
 
-        ttk.Label(frame_list, text="Элементы (старое имя → новое имя):").pack(anchor="w")
+        ttk.Label(frame_table, text="Элементы:").pack(anchor="w")
 
-        frame_list_inner = ttk.Frame(frame_list)
-        frame_list_inner.pack(fill=tk.BOTH, expand=True, pady=(5, 5))
+        cols = ("type", "exc", "lock", "conf", "mod", "path", "new")
+        self.tree = ttk.Treeview(
+            frame_table,
+            columns=cols,
+            show="headings",
+            selectmode="browse"
+        )
 
-        self.listbox = tk.Listbox(frame_list_inner, selectmode=tk.SINGLE)
-        scrollbar = ttk.Scrollbar(frame_list_inner, orient=tk.VERTICAL, command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=scrollbar.set)
+        headings = {
+            "type": "Тип",
+            "exc": "Исключен",
+            "lock": "Лок",
+            "conf": "Конфликт",
+            "mod": "Изменён",
+            "path": "Старый путь",
+            "new": "Новое имя",
+        }
 
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        for col in cols:
+            self.tree.heading(col, text=headings[col],
+                              command=lambda c=col: self.on_column_click(c))
 
-        frame_list_inner.rowconfigure(0, weight=1)
-        frame_list_inner.columnconfigure(0, weight=1)
+        # ширины по умолчанию
+        self.tree.column("type", width=70, anchor="center")
+        self.tree.column("exc", width=80, anchor="center")
+        self.tree.column("lock", width=60, anchor="center")
+        self.tree.column("conf", width=80, anchor="center")
+        self.tree.column("mod", width=80, anchor="center")
+        self.tree.column("path", width=400, anchor="w")
+        self.tree.column("new", width=250, anchor="w")
 
-        self.listbox.bind("<<ListboxSelect>>", self.on_listbox_select)
+        vsb = ttk.Scrollbar(frame_table, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         # Панель редактирования
         frame_edit = ttk.Frame(frame_center)
@@ -294,28 +314,27 @@ class RenameToolApp(tk.Tk):
         )
         chk_locked.pack(anchor="w", pady=(5, 5))
 
-        btn_apply = ttk.Button(frame_edit, text="Сохранить изменения для элемента", command=self.apply_changes_to_selected)
-        btn_apply.pack(anchor="w", pady=(10, 5))
+        ttk.Button(frame_edit, text="Сохранить изменения для элемента",
+                   command=self.apply_changes_to_selected).pack(anchor="w", pady=(10, 5))
 
-        btn_auto_fix = ttk.Button(
+        ttk.Button(
             frame_edit,
             text="Авто-решение конфликтов (для незафиксированных)",
             command=self.auto_resolve_conflicts
-        )
-        btn_auto_fix.pack(anchor="w", pady=(5, 5))
+        ).pack(anchor="w", pady=(5, 5))
 
-        # Нижняя часть: кнопка "Переименовать" + лог
+        # Нижняя часть: переименование + лог
         frame_bottom = ttk.Frame(self)
         frame_bottom.pack(fill=tk.BOTH, expand=False, padx=10, pady=(0, 10))
 
-        btn_rename = ttk.Button(frame_bottom, text="Переименовать все отмеченные элементы", command=self.rename_items)
-        btn_rename.pack(anchor="w", pady=(0, 5))
+        ttk.Button(frame_bottom, text="Переименовать все отмеченные элементы",
+                   command=self.rename_items).pack(anchor="w", pady=(0, 5))
 
         ttk.Label(frame_bottom, text="Лог:").pack(anchor="w")
         self.text_log = tk.Text(frame_bottom, height=8, state="disabled")
         self.text_log.pack(fill=tk.BOTH, expand=True)
 
-    # ---------- Обработчики и логика ----------
+    # ---------- ЛОГИКА ----------
 
     def browse_directory(self):
         dirname = filedialog.askdirectory()
@@ -333,6 +352,12 @@ class RenameToolApp(tk.Tk):
 
         self.items = []
         self.current_index = None
+        self.sort_column = None
+        self.sort_reverse = False
+        self.filter_conflicts_only.set(False)
+        self.filter_by_dir.set(False)
+        self.current_filter_dir = ""
+        self.label_current_dir_filter.config(text="Фильтр по поддиректории: (нет)")
 
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = os.path.relpath(dirpath, root)
@@ -346,15 +371,15 @@ class RenameToolApp(tk.Tk):
                 else:
                     new_name = translit_to_cyrillic(dname)
 
-                item = {
+                self.items.append({
                     "rel_dir": rel_dir,
                     "old_name": dname,
                     "new_name": new_name,
                     "do_rename": new_name != dname,
                     "is_dir": True,
                     "locked": False,
-                }
-                self.items.append(item)
+                    "modified": False,
+                })
 
             # ФАЙЛЫ
             for fname in filenames:
@@ -365,69 +390,45 @@ class RenameToolApp(tk.Tk):
                     new_base = translit_to_cyrillic(base)
                     new_name = new_base + ext
 
-                item = {
+                self.items.append({
                     "rel_dir": rel_dir,
                     "old_name": fname,
                     "new_name": new_name,
                     "do_rename": new_name != fname,
                     "is_dir": False,
                     "locked": False,
-                }
-                self.items.append(item)
+                    "modified": False,
+                })
 
-        self.refresh_listbox_with_conflicts(keep_position=False)
+        self.refresh_tree(keep_position=False)
         self.log(f"Сканирование завершено. Найдено элементов: {len(self.items)}")
 
-    def sort_items(self):
-        """Сортировка по поддиректориям и имени (папки перед файлами)."""
-        if not self.items:
-            return
-        self.items.sort(key=lambda info: (info["rel_dir"], not info["is_dir"], info["old_name"].lower()))
-        self.current_index = None
-        self.refresh_listbox_with_conflicts(keep_position=False)
-
     def on_filter_change(self):
-        """Обновление списка при смене фильтров."""
-        # если фильтр по поддиректории включён, но current_filter_dir ещё не задан —
-        # попробуем взять из текущего элемента
-        if self.filter_by_dir.get() and not self.current_filter_dir:
-            if self.current_index is not None and 0 <= self.current_index < len(self.items):
-                self.current_filter_dir = self.items[self.current_index]["rel_dir"]
         if self.filter_by_dir.get():
+            if not self.current_filter_dir:
+                if self.current_index is not None and 0 <= self.current_index < len(self.items):
+                    self.current_filter_dir = self.items[self.current_index]["rel_dir"]
             text = self.current_filter_dir if self.current_filter_dir else "(корень)"
         else:
             text = "(нет)"
         self.label_current_dir_filter.config(text=f"Фильтр по поддиректории: {text}")
 
-        self.refresh_listbox_with_conflicts(keep_position=True)
+        self.refresh_tree(keep_position=True)
 
-    def refresh_listbox_with_conflicts(self, keep_position=True):
-        """
-        Перестраивает listbox и помечает строки с конфликтами:
-        - внутренние конфликты (два элемента в одном родителе с одинаковым new_name);
-        - внешние конфликты (на диске уже существует элемент с таким именем).
-
-        Если keep_position=True — сохраняет текущий выбор и положение скролла.
-        """
-        # Запоминаем видимую позицию и выбор (в терминах self.items)
-        if keep_position and self.listbox.size() > 0 and self.view_indices:
-            first_view = self.listbox.nearest(0)
-            if 0 <= first_view < len(self.view_indices):
-                first_under = self.view_indices[first_view]
-            else:
-                first_under = None
+    def on_column_click(self, col):
+        if self.sort_column == col:
+            self.sort_reverse = not self.sort_reverse
         else:
-            first_under = None
+            self.sort_column = col
+            self.sort_reverse = False
+        self.refresh_tree(keep_position=True)
 
-        selected_under = self.current_index
-
-        self.listbox.delete(0, tk.END)
-        self.view_indices = []
+    def _compute_conflicts(self):
+        """Заполняет self.conflict_indices на основе self.items."""
         self.conflict_indices = set()
-
         root = self.directory.get().strip()
 
-        # 1. Внутренние конфликты (по модели целиком)
+        # внутренние конфликты
         mapping = {}
         for idx, info in enumerate(self.items):
             if not info["do_rename"]:
@@ -437,11 +438,11 @@ class RenameToolApp(tk.Tk):
             key = (info["rel_dir"], info["new_name"])
             mapping.setdefault(key, []).append(idx)
 
-        for key, indices in mapping.items():
+        for indices in mapping.values():
             if len(indices) > 1:
                 self.conflict_indices.update(indices)
 
-        # 2. Внешние конфликты
+        # внешние конфликты
         if root and os.path.isdir(root):
             for idx, info in enumerate(self.items):
                 if not info["do_rename"]:
@@ -456,66 +457,115 @@ class RenameToolApp(tk.Tk):
                 if os.path.exists(dst) and os.path.abspath(dst) != os.path.abspath(src):
                     self.conflict_indices.add(idx)
 
-        # 3. Заполняем listbox с учётом фильтров
-        for idx, info in enumerate(self.items):
-            # фильтр "только конфликтующие"
+    def _sort_indices(self, indices):
+        """Сортировка списка индексов по текущей сортировке."""
+        def key_func(idx):
+            info = self.items[idx]
+
+            if self.sort_column == "type":
+                return (0 if info["is_dir"] else 1, info["rel_dir"], info["old_name"].lower())
+            if self.sort_column == "exc":
+                # Исключён = do_rename False -> [X]
+                return (0 if not info["do_rename"] else 1, info["rel_dir"], info["old_name"].lower())
+            if self.sort_column == "lock":
+                return (0 if info["locked"] else 1, info["rel_dir"], info["old_name"].lower())
+            if self.sort_column == "conf":
+                return (0 if idx in self.conflict_indices else 1, info["rel_dir"], info["old_name"].lower())
+            if self.sort_column == "mod":
+                return (0 if info.get("modified", False) else 1, info["rel_dir"], info["old_name"].lower())
+            if self.sort_column == "path":
+                rel_path = os.path.join(info["rel_dir"], info["old_name"]) if info["rel_dir"] else info["old_name"]
+                return rel_path.lower()
+            if self.sort_column == "new":
+                return info["new_name"].lower()
+
+            # сортировка по умолчанию: по пути
+            rel_path = os.path.join(info["rel_dir"], info["old_name"]) if info["rel_dir"] else info["old_name"]
+            return rel_path.lower()
+
+        indices.sort(key=key_func, reverse=self.sort_reverse)
+
+    def refresh_tree(self, keep_position=True):
+        """Перестраивает дерево с учётом фильтров, конфликтов и сортировки."""
+        # Запоминаем позицию и выбор
+        if keep_position:
+            yview = self.tree.yview()
+            selected = self.tree.selection()
+        else:
+            yview = (0.0, 1.0)
+            selected = ()
+
+        for child in self.tree.get_children():
+            self.tree.delete(child)
+
+        self._compute_conflicts()
+
+        indices = list(range(len(self.items)))
+
+        # фильтры
+        filtered = []
+        for idx in indices:
+            info = self.items[idx]
+
             if self.filter_conflicts_only.get() and idx not in self.conflict_indices:
                 continue
 
-            # фильтр "только выбранная поддиректория"
             if self.filter_by_dir.get():
                 if info["rel_dir"] != self.current_filter_dir:
                     continue
 
-            self.view_indices.append(idx)
+            filtered.append(idx)
+
+        self._sort_indices(filtered)
+
+        # вставка строк
+        for idx in filtered:
+            info = self.items[idx]
+            is_conf = idx in self.conflict_indices
+
+            type_str = "DIR" if info["is_dir"] else "FILE"
+            exc_str = "X" if not info["do_rename"] else ""
+            lock_str = "L" if info["locked"] else ""
+            conf_str = "!" if is_conf and info["do_rename"] else ""
+            mod_str = "M" if info.get("modified", False) else ""
 
             rel_path = os.path.join(info["rel_dir"], info["old_name"]) if info["rel_dir"] else info["old_name"]
 
-            tags = []
-            tags.append("[DIR]" if info["is_dir"] else "[FILE]")
-            if not info["do_rename"]:
-                tags.append("[X]")
-            if info["locked"]:
-                tags.append("[L]")
-            if idx in self.conflict_indices and info["do_rename"]:
-                tags.append("[!]")
+            values = (type_str, exc_str, lock_str, conf_str, mod_str, rel_path, info["new_name"])
 
-            prefix = " ".join(tags)
-            display = f"{prefix} {rel_path}  →  {info['new_name']}"
-            view_pos = self.listbox.size()
-            self.listbox.insert(tk.END, display)
+            iid = str(idx)
+            self.tree.insert("", "end", iid=iid, values=values)
 
-            if idx in self.conflict_indices and info["do_rename"]:
-                try:
-                    self.listbox.itemconfig(view_pos, foreground="red")
-                except Exception:
-                    pass
+            if is_conf and info["do_rename"]:
+                self.tree.tag_configure("conflict", foreground="red")
+                self.tree.item(iid, tags=("conflict",))
 
-        # 4. Восстанавливаем выбор и положение скролла
-        size = self.listbox.size()
-        if keep_position and size > 0 and self.view_indices:
-            # сначала пробуем восстановить текущий выбранный элемент
-            if selected_under is not None and selected_under in self.view_indices:
-                view_idx = self.view_indices.index(selected_under)
-                self.listbox.selection_set(view_idx)
-                self.listbox.activate(view_idx)
-                self.listbox.see(view_idx)
-            # если не вышло — пробуем вернуть прежний верхний элемент
-            elif first_under is not None and first_under in self.view_indices:
-                view_idx = self.view_indices.index(first_under)
-                self.listbox.see(view_idx)
+        # восстановление выбора и позиции
+        if keep_position:
+            existing_iids = set(self.tree.get_children())
+            # выбор
+            for s in selected:
+                if s in existing_iids:
+                    self.tree.selection_set(s)
+                    self.tree.focus(s)
+                    break
+            # позиция
+            self.tree.yview_moveto(yview[0])
 
-    def on_listbox_select(self, event):
-        selection = self.listbox.curselection()
-        if not selection:
+    def on_tree_select(self, event):
+        sel = self.tree.selection()
+        if not sel:
             return
-        view_idx = selection[0]
-        if view_idx < 0 or view_idx >= len(self.view_indices):
+        iid = sel[0]
+        try:
+            idx = int(iid)
+        except ValueError:
             return
 
-        idx = self.view_indices[view_idx]
+        if not (0 <= idx < len(self.items)):
+            return
+
         self.current_index = idx
-
         info = self.items[idx]
 
         rel_path = os.path.join(info["rel_dir"], info["old_name"]) if info["rel_dir"] else info["old_name"]
@@ -525,22 +575,19 @@ class RenameToolApp(tk.Tk):
         self.locked_var.set(info["locked"])
         self.label_type.config(text=f"Тип: {'папка' if info['is_dir'] else 'файл'}")
 
-        # если фильтр по поддиректории включён — обновляем каталог фильтра
         if self.filter_by_dir.get():
             self.current_filter_dir = info["rel_dir"]
             text = self.current_filter_dir if self.current_filter_dir else "(корень)"
             self.label_current_dir_filter.config(text=f"Фильтр по поддиректории: {text}")
-            # чтобы сразу пересчитать список
-            self.refresh_listbox_with_conflicts(keep_position=True)
+            self.refresh_tree(keep_position=True)
 
     def apply_changes_to_selected(self):
         idx = self.current_index
-        if idx is None or idx < 0 or idx >= len(self.items):
+        if idx is None or not (0 <= idx < len(self.items)):
             messagebox.showinfo("Информация", "Сначала выберите элемент в списке.")
             return
 
         info = self.items[idx]
-
         new_name = self.new_name_var.get().strip()
         if not new_name:
             messagebox.showwarning("Внимание", "Новое имя не может быть пустым.")
@@ -550,27 +597,29 @@ class RenameToolApp(tk.Tk):
         info["do_rename"] = self.do_rename_var.get()
         info["locked"] = self.locked_var.get()
 
-        self.refresh_listbox_with_conflicts(keep_position=True)
+        # пометка [M]: кириллическое исходное имя и новое имя отличное от старого
+        if has_cyrillic(info["old_name"]) and info["new_name"] != info["old_name"]:
+            info["modified"] = True
+        else:
+            info["modified"] = False
+
+        self.refresh_tree(keep_position=True)
 
         rel_path = os.path.join(info["rel_dir"], info["old_name"]) if info["rel_dir"] else info["old_name"]
         self.log(
             f"Обновлено: {rel_path} → {info['new_name']} "
-            f"(переименовывать: {info['do_rename']}, зафиксировано: {info['locked']})"
+            f"(переименовывать: {info['do_rename']}, зафиксировано: {info['locked']}, изменён: {info['modified']})"
         )
 
     def toggle_lock_for_selected(self):
         idx = self.current_index
-        if idx is None or idx < 0 or idx >= len(self.items):
+        if idx is None or not (0 <= idx < len(self.items)):
             return
         info = self.items[idx]
         info["locked"] = self.locked_var.get()
-        self.refresh_listbox_with_conflicts(keep_position=True)
+        self.refresh_tree(keep_position=True)
 
     def auto_resolve_conflicts(self):
-        """
-        Автоматически решаем конфликты только для НЕ зафиксированных элементов:
-        добавляем суффиксы _1, _2, ...
-        """
         if not self.conflict_indices:
             messagebox.showinfo("Информация", "Конфликтов не обнаружено.")
             return
@@ -597,7 +646,6 @@ class RenameToolApp(tk.Tk):
                 continue
 
             parent_rel = info["rel_dir"]
-
             base, ext = os.path.splitext(info["new_name"])
             used = occupied_names(parent_rel)
 
@@ -615,9 +663,10 @@ class RenameToolApp(tk.Tk):
             if candidate != info["new_name"]:
                 self.log(f"Авто-правка: {info['new_name']} → {candidate}")
                 info["new_name"] = candidate
+                # флаг modified не трогаем — [M] остаётся только за ручными изменениями
                 changed += 1
 
-        self.refresh_listbox_with_conflicts(keep_position=True)
+        self.refresh_tree(keep_position=True)
         messagebox.showinfo("Готово", f"Автоматически скорректировано имён: {changed}")
 
     def rename_items(self):
@@ -693,7 +742,7 @@ class RenameToolApp(tk.Tk):
         for idx in dir_indices:
             process_index(idx)
 
-        self.refresh_listbox_with_conflicts(keep_position=True)
+        self.refresh_tree(keep_position=True)
         messagebox.showinfo("Готово", f"Переименовано: {renamed_count}\nОшибок/пропусков: {errors_count}")
 
     def save_session(self):
@@ -743,15 +792,30 @@ class RenameToolApp(tk.Tk):
             messagebox.showerror("Ошибка", "Формат файла сессии некорректен.")
             return
 
+        # нормализация полей
+        norm_items = []
+        for it in items:
+            norm_items.append({
+                "rel_dir": it.get("rel_dir", ""),
+                "old_name": it.get("old_name", ""),
+                "new_name": it.get("new_name", it.get("old_name", "")),
+                "do_rename": bool(it.get("do_rename", False)),
+                "is_dir": bool(it.get("is_dir", False)),
+                "locked": bool(it.get("locked", False)),
+                "modified": bool(it.get("modified", False)),
+            })
+
         self.directory.set(root)
-        self.items = items
+        self.items = norm_items
         self.current_index = None
-        self.current_filter_dir = ""
+        self.sort_column = None
+        self.sort_reverse = False
         self.filter_conflicts_only.set(False)
         self.filter_by_dir.set(False)
+        self.current_filter_dir = ""
         self.label_current_dir_filter.config(text="Фильтр по поддиректории: (нет)")
 
-        self.refresh_listbox_with_conflicts(keep_position=False)
+        self.refresh_tree(keep_position=False)
         self.log(f"Сессия загружена из {path}")
 
     def log(self, msg: str):
